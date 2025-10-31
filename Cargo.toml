@@ -2,8 +2,10 @@
 name = "chromiumoxide_event_listener"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 authors = ["George Pinaev"]
 description = "Chromiumoxide events listener"
+repository = "https://github.com/geopin90/chromiumoxide_event_listener"
 
 [dependencies]
 futures = "0.3.31"
