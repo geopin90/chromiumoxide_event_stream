@@ -300,7 +300,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "chromiumoxide_event_listener"
+name = "chromiumoxide_event_stream"
 version = "0.1.0"
 dependencies = [
  "chromiumoxide",

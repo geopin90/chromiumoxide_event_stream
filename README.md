@@ -1,4 +1,4 @@
-# chromiumoxide_event_listener
+# chromiumoxide_event_stream
 Capture network responses from Chromium pages using chromiumoxide, with simple JS hooks for fetch/XHR. Stream events back to Rust with optional URL and content-type filtering. Works with any text-based content.
 
 ## Features
@@ -10,7 +10,7 @@ Capture network responses from Chromium pages using chromiumoxide, with simple J
 ## Quick start (generic events)
 ```rust
 use chromiumoxide::Browser; // set up your browser/Page as usual
-use chromiumoxide_event_listener::{
+use chromiumoxide_event_stream::{
     EventStreamConfig,
     start_event_stream,
 };
