@@ -85,9 +85,6 @@ fn should_capture(
 
 /// Start a background task that captures network events via CDP and streams them over a mpsc channel.
 /// Returns the receiver; the task ends when the `Page` errors or the sender is dropped.
-/// 
-/// This uses Chrome DevTools Protocol (CDP) network events instead of JavaScript hooks,
-/// providing more reliable and comprehensive network monitoring.
 pub async fn start_event_stream(
     page: Page,
     config: EventStreamConfig,
@@ -104,8 +101,7 @@ pub async fn start_event_stream(
     let pending_responses: Arc<Mutex<HashMap<String, PendingResponse>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    let config_clone = config.clone();
-    let pending_clone = Arc::clone(&pending_responses);
+    let pending_clone = pending_responses.clone();
 
     // Spawn task to handle response received events
     let page_response = page.clone();
@@ -130,7 +126,7 @@ pub async fn start_event_stream(
                 .map(|s| s.to_string());
             
             // Check if we should capture this response
-            if should_capture(&config_clone, &url, content_type.as_deref()) {
+            if should_capture(&config, &url, content_type.as_deref()) {
                 let pending = PendingResponse {
                     url,
                     content_type,
@@ -138,11 +134,10 @@ pub async fn start_event_stream(
                 };
 
                 // Store pending response by request_id (use inner() to get String)
-                let request_id_str = event.request_id.inner().clone();
                 pending_clone
                     .lock()
                     .await
-                    .insert(request_id_str, pending);
+                    .insert(event.request_id.inner().clone(), pending);
             }
         }
     });
