@@ -45,7 +45,7 @@ pub struct Event {
 }
 
 /// Install JS hooks to capture responses (any content-type) from fetch/XHR into a window buffer.
-pub async fn install_event_hooks(page: &Page, config: &EventStreamConfig) -> Result<(), Error> {
+async fn install_event_hooks(page: &Page, config: &EventStreamConfig) -> Result<(), Error> {
     let url_filter_js =
         serde_json::to_string(&config.url_substring_filter).unwrap_or("null".into());
     let ct_filter_js =
@@ -120,7 +120,7 @@ pub async fn install_event_hooks(page: &Page, config: &EventStreamConfig) -> Res
 }
 
 /// Drain and parse all captured raw events from the page buffer.
-pub async fn drain_events(page: &Page) -> Result<Vec<Event>, Error> {
+async fn drain_events(page: &Page) -> Result<Vec<Event>, Error> {
     let js = "(() => { try { if (!window.__event_stream) return '[]'; const a = window.__event_stream.splice(0); return JSON.stringify(a); } catch(e) { return '[]'; } })()";
     let mut s: String = page
         .evaluate_expression(js)
