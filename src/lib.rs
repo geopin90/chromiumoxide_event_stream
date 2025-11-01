@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use futures::channel::mpsc;
 use futures::SinkExt;
+use futures::channel::mpsc;
 use serde::Deserialize;
 
 use chromiumoxide::error::CdpError;
@@ -46,8 +46,10 @@ pub struct Event {
 
 /// Install JS hooks to capture responses (any content-type) from fetch/XHR into a window buffer.
 pub async fn install_event_hooks(page: &Page, config: &EventStreamConfig) -> Result<(), Error> {
-    let url_filter_js = serde_json::to_string(&config.url_substring_filter).unwrap_or("null".into());
-    let ct_filter_js = serde_json::to_string(&config.content_type_substring_filter).unwrap_or("null".into());
+    let url_filter_js =
+        serde_json::to_string(&config.url_substring_filter).unwrap_or("null".into());
+    let ct_filter_js =
+        serde_json::to_string(&config.content_type_substring_filter).unwrap_or("null".into());
 
     let js = format!(
         r#"(function(cfg){{
@@ -108,8 +110,7 @@ pub async fn install_event_hooks(page: &Page, config: &EventStreamConfig) -> Res
     }}
   }} catch(e) {{}}
 }})({{ urlFilter: {}, ctFilter: {} }});"#,
-        url_filter_js,
-        ct_filter_js,
+        url_filter_js, ct_filter_js,
     );
 
     page.evaluate_expression(js)
@@ -127,7 +128,9 @@ pub async fn drain_events(page: &Page) -> Result<Vec<Event>, Error> {
         .map_err(Error::DrainJs)?
         .into_value()
         .unwrap_or_default();
-    if s.is_empty() { s = "[]".to_string(); }
+    if s.is_empty() {
+        s = "[]".to_string();
+    }
     let events: Vec<Event> = serde_json::from_str(&s).map_err(Error::ParseJson)?;
     Ok(events)
 }
@@ -152,7 +155,7 @@ pub async fn start_event_stream(
                             return; // receiver dropped
                         }
                     }
-                },
+                }
                 Err(_e) => {
                     // page likely went away; stop
                     return;
@@ -164,5 +167,3 @@ pub async fn start_event_stream(
 
     Ok(rx)
 }
-
-
