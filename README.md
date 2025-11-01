@@ -1,65 +1,61 @@
 # chromiumoxide_event_stream
-Capture network responses from Chromium pages using chromiumoxide, with simple JS hooks for fetch/XHR. Stream events back to Rust with optional URL and content-type filtering. Works with any text-based content.
+Capture network responses from Chromium pages using chromiumoxide CDP (Chrome DevTools Protocol). Stream events back to Rust with optional URL and content-type filtering. Works with any text-based content.
 
 ## Features
-- Capture fetch/XHR responses into a page-side buffer
-- Poll and stream events to Rust using `tokio` and `futures::channel::mpsc`
-- Filter by URL substring and/or content-type substring
-- API for Generic text events (`start_event_stream`, `Event`)
+- **Event-driven**: Uses Chrome DevTools Protocol (CDP) network events for reliable, real-time monitoring
+- **Comprehensive coverage**: Captures all network requests, not just fetch/XHR
+- **Streaming API**: Returns `mpsc::UnboundedReceiver<Event>` for async processing
+- **Flexible filtering**: Filter by URL substring and/or content-type substring
+- **Automatic base64 decoding**: Handles binary responses transparently
 
-## Quick start (generic events)
+## Why Use This Library?
+
+While you *could* use chromiumoxide's CDP APIs directly, this library saves you from writing ~150+ lines of complex coordination code:
+
+### What This Library Provides
+
+**One function call**:
+
 ```rust
-use chromiumoxide::Browser; // set up your browser/Page as usual
-use chromiumoxide_event_stream::{
-    EventStreamConfig,
-    start_event_stream,
-};
-
-# async fn demo(page: chromiumoxide::page::Page) -> anyhow::Result<()> {
-let rx = start_event_stream(
+let mut rx = start_event_stream(
     page,
     EventStreamConfig {
-        poll_interval_ms: 300,
-        url_substring_filter: Some("/Search".to_string()),                    // e.g. Some("/api/")
-        content_type_substring_filter: Some("application/json".to_string()),  // e.g. Some("text/html")
+        url_substring_filter: Some("/api/".to_string()),
+        content_type_substring_filter: Some("application/json".to_string()),
     },
 ).await?;
 
-tokio::spawn(async move {
-    let mut rx = rx;
-    while let Some(ev) = rx.next().await {
-        println!("{} {} -> {} bytes", ev.status.unwrap_or(0), ev.url, ev.body.len());
-    }
-});
-# Ok(()) }
+while let Some(event) = rx.next().await {
+    // Use the event - URL, headers, status, body all ready
+    println!("{} -> {} bytes", ev.url, ev.body.len());
+}
 ```
 
+**Result**: ~150 lines of complex async code → **3 lines of simple API usage**
+
+### When to Use chromiumoxide Directly
+
+Use chromiumoxide directly if you need:
+- Fine-grained control over individual CDP commands
+- Custom event coordination logic
+- Access to raw CDP event structures
+- Very specific performance optimizations
+
+### For the common case of "capture network responses with filtering", this library is the right choice.
+
 ## What event types can I capture?
-Anything text-based returned by fetch/XHR:
-- HTML: `text/html`
-- JSON: `application/json`
-- XML: `application/xml`, `text/xml`
-- Plain text: `text/plain` (including logs, NDJSON if sent as text)
-- CSV/TSV: `text/csv`, `text/tab-separated-values`
-- JavaScript/CSS: `application/javascript`, `text/javascript`, `text/css`
-- SVG: `image/svg+xml`
-- Form responses: `application/x-www-form-urlencoded`, `multipart/form-data` (text parts only)
 
-#### Warning:
-Binary payloads (e.g., `image/png`, `application/pdf`, `application/octet-stream`) will be coerced via `response.text()` and get mangled. If you need binary, consider extending the hooks to `arrayBuffer()` + base64.
+The library captures all network responses via CDP, including:
+- **HTML**: `text/html`
+- **JSON**: `application/json`
+- **XML**: `application/xml`, `text/xml`
+- **Plain text**: `text/plain` (including logs, NDJSON if sent as text)
+- **CSV/TSV**: `text/csv`, `text/tab-separated-values`
+- **JavaScript/CSS**: `application/javascript`, `text/javascript`, `text/css`
+- **SVG**: `image/svg+xml` (XML text format)
+- **Form responses**: `application/x-www-form-urlencoded`, `multipart/form-data` (text parts)
+- **Binary Responses**: Binary payloads (e.g., `image/png`, `application/pdf`, `application/octet-stream`) are automatically base64-decoded when possible. The body is converted to a UTF-8 string using lossy conversion (`String::from_utf8_lossy`), so binary data may not be fully recoverable. For true binary handling, consider using chromiumoxide's CDP APIs directly.
 
-## API overview
-- `install_event_hooks(&Page, &EventStreamConfig)` – install generic hooks
-- `drain_events(&Page) -> Vec<Event>` – drain all buffered events
-- `start_event_stream(Page, EventStreamConfig) -> mpsc::UnboundedReceiver<Event>` – spawn poller and get a receiver
-
-## Filters
-- `url_substring_filter`: only capture events whose URL contains this substring.
-- `content_type_substring_filter`: only capture events whose content-type contains this substring.
-
-Examples:
-- Only HTML: `content_type_substring_filter = Some("text/html".into())`
-- Only CSV: `content_type_substring_filter = Some("text/csv".into())`
-- All text: leave both filters as `None` and filter client-side.
+---
 
 This project was bootstrapped with the assistance of Cursor AI.
