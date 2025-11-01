@@ -1,25 +1,31 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Arc;
 
+use base64::Engine;
+use futures::StreamExt;
 use futures::SinkExt;
 use futures::channel::mpsc;
 use serde::Deserialize;
+use tokio::sync::Mutex;
 
 use chromiumoxide::error::CdpError;
 use chromiumoxide::page::Page;
+use chromiumoxide::cdp::browser_protocol::network::{
+    EnableParams, EventResponseReceived, EventLoadingFinished, GetResponseBodyParams,
+};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("inject_js: {0}")]
-    InjectJs(CdpError),
-    #[error("drain_js: {0}")]
-    DrainJs(CdpError),
-    #[error("parse_json: {0}")]
-    ParseJson(serde_json::Error),
+    #[error("enable_network: {0}")]
+    EnableNetwork(CdpError),
+    #[error("get_response_body: {0}")]
+    GetResponseBody(CdpError),
+    #[error("base64_decode: {0}")]
+    Base64Decode(base64::DecodeError),
 }
 
 #[derive(Clone, Debug)]
 pub struct EventStreamConfig {
-    pub poll_interval_ms: u64,
     pub url_substring_filter: Option<String>,
     pub content_type_substring_filter: Option<String>,
 }
@@ -27,7 +33,6 @@ pub struct EventStreamConfig {
 impl Default for EventStreamConfig {
     fn default() -> Self {
         Self {
-            poll_interval_ms: 300,
             url_substring_filter: None,
             content_type_substring_filter: None,
         }
@@ -44,124 +49,161 @@ pub struct Event {
     pub body: String,
 }
 
-/// Install JS hooks to capture responses (any content-type) from fetch/XHR into a window buffer.
-async fn install_event_hooks(page: &Page, config: &EventStreamConfig) -> Result<(), Error> {
-    let url_filter_js =
-        serde_json::to_string(&config.url_substring_filter).unwrap_or("null".into());
-    let ct_filter_js =
-        serde_json::to_string(&config.content_type_substring_filter).unwrap_or("null".into());
-
-    let js = format!(
-        r#"(function(cfg){{
-  try {{
-    window.__event_stream = window.__event_stream || [];
-    const urlFilter = cfg.urlFilter; // string or null
-    const ctFilter = cfg.ctFilter;   // string or null
-
-    function shouldCapture(url, ct) {{
-      const okUrl = !urlFilter || (url && url.indexOf(urlFilter) !== -1);
-      const okCt = !ctFilter || (ct && ct.indexOf(ctFilter) !== -1);
-      return okUrl && okCt;
-    }}
-
-    // fetch hook
-    if (!window.__event_fetch_hooked) {{
-      window.__event_fetch_hooked = true;
-      const origFetch = window.fetch;
-      window.fetch = async function(input, init) {{
-        const res = await origFetch.apply(this, arguments);
-        try {{
-          const ct = (res.headers && res.headers.get && res.headers.get('content-type')) || '';
-          const url = res.url || (typeof input === 'string' ? input : (input && input.url) || '');
-          if (shouldCapture(url, ct)) {{
-            const clone = res.clone();
-            clone.text().then(function(txt) {{
-              try {{
-                window.__event_stream.push({{ url: url, body: txt, contentType: ct, status: res.status }});
-              }} catch(e) {{}}
-            }});
-          }}
-        }} catch(e) {{}}
-        return res;
-      }};
-    }}
-
-    // XHR hook
-    if (!window.__event_xhr_hooked) {{
-      window.__event_xhr_hooked = true;
-      const origOpen = XMLHttpRequest.prototype.open;
-      const origSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.open = function(method, url) {{
-        try {{ this.__event_url = url; }} catch(e) {{}}
-        return origOpen.apply(this, arguments);
-      }};
-      XMLHttpRequest.prototype.send = function(body) {{
-        this.addEventListener('load', function() {{
-          try {{
-            const ct = (this.getResponseHeader && this.getResponseHeader('content-type')) || '';
-            const url = this.responseURL || this.__event_url || '';
-            if (shouldCapture(url, ct)) {{
-              window.__event_stream.push({{ url: url, body: this.responseText || '', contentType: ct, status: this.status }});
-            }}
-          }} catch(e) {{}}
-        }});
-        return origSend.apply(this, arguments);
-      }};
-    }}
-  }} catch(e) {{}}
-}})({{ urlFilter: {}, ctFilter: {} }});"#,
-        url_filter_js, ct_filter_js,
-    );
-
-    page.evaluate_expression(js)
-        .await
-        .map_err(Error::InjectJs)?;
-    Ok(())
+// Internal structure to track pending responses
+#[derive(Clone, Debug)]
+struct PendingResponse {
+    url: String,
+    content_type: Option<String>,
+    status: Option<u16>,
 }
 
-/// Drain and parse all captured raw events from the page buffer.
-async fn drain_events(page: &Page) -> Result<Vec<Event>, Error> {
-    let js = "(() => { try { if (!window.__event_stream) return '[]'; const a = window.__event_stream.splice(0); return JSON.stringify(a); } catch(e) { return '[]'; } })()";
-    let mut s: String = page
-        .evaluate_expression(js)
-        .await
-        .map_err(Error::DrainJs)?
-        .into_value()
-        .unwrap_or_default();
-    if s.is_empty() {
-        s = "[]".to_string();
-    }
-    let events: Vec<Event> = serde_json::from_str(&s).map_err(Error::ParseJson)?;
-    Ok(events)
+
+// Helper function to check if an event should be captured
+fn should_capture(
+    config: &EventStreamConfig,
+    url: &str,
+    content_type: Option<&str>,
+) -> bool {
+    let url_ok = config
+        .url_substring_filter
+        .as_ref()
+        .map(|filter| url.contains(filter))
+        .unwrap_or(true);
+
+    let ct_ok = config
+        .content_type_substring_filter
+        .as_ref()
+        .map(|filter| {
+            content_type
+                .map(|ct| ct.contains(filter))
+                .unwrap_or(false)
+        })
+        .unwrap_or(true);
+
+    url_ok && ct_ok
 }
 
-/// Start a background task that polls for captured events and streams them over a mpsc channel.
+/// Start a background task that captures network events via CDP and streams them over a mpsc channel.
 /// Returns the receiver; the task ends when the `Page` errors or the sender is dropped.
+/// 
+/// This uses Chrome DevTools Protocol (CDP) network events instead of JavaScript hooks,
+/// providing more reliable and comprehensive network monitoring.
 pub async fn start_event_stream(
     page: Page,
     config: EventStreamConfig,
 ) -> Result<mpsc::UnboundedReceiver<Event>, Error> {
-    install_event_hooks(&page, &config).await?;
+    // Enable network tracking via CDP
+    page.execute(EnableParams::default())
+        .await
+        .map_err(Error::EnableNetwork)?;
 
     let (mut tx, rx) = mpsc::unbounded();
-    let interval = config.poll_interval_ms;
 
+    // Shared state to track pending responses (request_id -> metadata)
+    // Use RequestId directly by cloning it
+    let pending_responses: Arc<Mutex<HashMap<String, PendingResponse>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let config_clone = config.clone();
+    let pending_clone = Arc::clone(&pending_responses);
+
+    // Spawn task to handle response received events
+    let page_response = page.clone();
     tokio::spawn(async move {
-        loop {
-            match drain_events(&page).await {
-                Ok(events) => {
-                    for ev in events {
-                        if tx.send(ev).await.is_err() {
-                            return; // receiver dropped
+        let mut events = match page_response.event_listener::<EventResponseReceived>().await {
+            Ok(e) => e,
+            Err(_) => return, // page error
+        };
+
+        while let Some(event) = events.next().await {
+            // Extract response metadata
+            let url = event.response.url.clone();
+            let status = Some(event.response.status as u16);
+            let headers = &event.response.headers;
+            
+            // Extract content-type from headers
+            let headers_value = headers.inner();
+            let content_type = headers_value
+                .get("content-type")
+                .or_else(|| headers_value.get("Content-Type"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            
+            // Check if we should capture this response
+            if should_capture(&config_clone, &url, content_type.as_deref()) {
+                let pending = PendingResponse {
+                    url,
+                    content_type,
+                    status,
+                };
+
+                // Store pending response by request_id (use inner() to get String)
+                let request_id_str = event.request_id.inner().clone();
+                pending_clone
+                    .lock()
+                    .await
+                    .insert(request_id_str, pending);
+            }
+        }
+    });
+
+    // Spawn task to handle loading finished events and fetch bodies
+    tokio::spawn(async move {
+        let mut events = match page.event_listener::<EventLoadingFinished>().await {
+            Ok(e) => e,
+            Err(_) => return, // page error
+        };
+
+        while let Some(event) = events.next().await {
+            let request_id_str = event.request_id.inner().clone();
+
+            // Get pending response metadata
+            let pending = pending_responses.lock().await.remove(&request_id_str);
+            let pending = match pending {
+                Some(p) => p,
+                None => continue, // Not a response we're tracking
+            };
+
+            // Fetch the response body
+            let body_result = page
+                .execute(GetResponseBodyParams {
+                    request_id: event.request_id.clone(),
+                })
+                .await;
+
+            let body = match body_result {
+                Ok(result) => {
+                    // CDP returns body as base64 if binary, or plain text
+                    if result.base64_encoded {
+                        // Decode base64
+                        match base64::engine::general_purpose::STANDARD.decode(&result.body) {
+                            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                            Err(e) => {
+                                eprintln!("Failed to decode base64 body: {}", e);
+                                continue;
+                            }
                         }
+                    } else {
+                        result.body.clone()
                     }
                 }
-                Err(_e) => {
-                    // page likely went away; stop
-                    return;
+                Err(_) => {
+                    // Failed to get body, skip this event
+                    continue;
                 }
+            };
+
+            // Create and send event
+            let event = Event {
+                url: pending.url,
+                content_type: pending.content_type,
+                status: pending.status,
+                body,
+            };
+
+            if tx.send(event).await.is_err() {
+                return; // receiver dropped
             }
-            tokio::time::sleep(Duration::from_millis(interval)).await;
         }
     });
 
