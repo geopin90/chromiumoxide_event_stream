@@ -1,5 +1,5 @@
 # chromiumoxide_event_stream
-Capture network responses from Chromium pages using chromiumoxide CDP (Chrome DevTools Protocol). Stream events back to Rust with optional URL and content-type filtering. Works with any text-based content.
+Capture network responses from Chromium pages using chromiumoxide CDP. Stream events back to Rust with optional URL and content-type filtering. Works with any text-based content.
 
 ## Features
 - **Event-driven**: Uses Chrome DevTools Protocol (CDP) network events for reliable, real-time monitoring
@@ -8,11 +8,11 @@ Capture network responses from Chromium pages using chromiumoxide CDP (Chrome De
 - **Flexible filtering**: Filter by URL substring and/or content-type substring
 - **Automatic base64 decoding**: Handles binary responses transparently
 
-## Why Use This Library?
+## Why Use This Crate?
 
-While you *could* use chromiumoxide's CDP APIs directly, this library saves you from writing ~150+ lines of complex coordination code:
+While you *could* use chromiumoxide's CDP APIs directly, this crate saves you from writing ~150+ lines of complex coordination code:
 
-### What This Library Provides
+### What This Crate Provides
 
 **One function call**:
 
@@ -41,7 +41,7 @@ Use chromiumoxide directly if you need:
 - Access to raw CDP event structures
 - Very specific performance optimizations
 
-### For the common case of "capture network responses with filtering", this library is the right choice.
+### For the common case of "capture network responses with filtering", this crate is the right choice.
 
 ## What event types can I capture?
 
