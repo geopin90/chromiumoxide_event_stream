@@ -33,6 +33,37 @@ while let Some(event) = rx.next().await {
 
 **Result**: ~150 lines of complex async code → **3 lines of simple API usage**
 
+### Handling Timeouts
+
+If you're waiting for a specific event after an action (e.g., clicking a button), you may want to avoid hanging indefinitely if the event never arrives. Use `wait_for_event_with_timeout` instead of `rx.next().await`:
+
+```rust
+use std::time::Duration;
+use chromiumoxide_event_stream::{start_event_stream, wait_for_event_with_timeout};
+
+let mut rx = start_event_stream(page, config).await?;
+
+// Perform some action (e.g., click a button)
+button.click().await?;
+
+// Wait up to 5 seconds for an event
+match wait_for_event_with_timeout(&mut rx, Duration::from_secs(5)).await {
+    Ok(Some(event)) => {
+        println!("Received event: {}", event.url);
+        // Process the event
+    },
+    Ok(None) => {
+        println!("Stream closed");
+    },
+    Err(_) => {
+        println!("Timeout: no event received after action");
+        // Handle the case where no event appeared
+    }
+}
+```
+
+This prevents your program from hanging when the expected event doesn't arrive.
+
 ### When to Use chromiumoxide Directly
 
 Use chromiumoxide directly if you need:

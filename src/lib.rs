@@ -1,18 +1,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine;
-use futures::StreamExt;
 use futures::SinkExt;
+use futures::StreamExt;
 use futures::channel::mpsc;
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tokio::time;
 
+use chromiumoxide::cdp::browser_protocol::network::{
+    EnableParams, EventLoadingFinished, EventResponseReceived, GetResponseBodyParams,
+};
 use chromiumoxide::error::CdpError;
 use chromiumoxide::page::Page;
-use chromiumoxide::cdp::browser_protocol::network::{
-    EnableParams, EventResponseReceived, EventLoadingFinished, GetResponseBodyParams,
-};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -24,19 +26,10 @@ pub enum Error {
     Base64Decode(base64::DecodeError),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EventStreamConfig {
     pub url_substring_filter: Option<String>,
     pub content_type_substring_filter: Option<String>,
-}
-
-impl Default for EventStreamConfig {
-    fn default() -> Self {
-        Self {
-            url_substring_filter: None,
-            content_type_substring_filter: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -57,13 +50,8 @@ struct PendingResponse {
     status: Option<u16>,
 }
 
-
 // Helper function to check if an event should be captured
-fn should_capture(
-    config: &EventStreamConfig,
-    url: &str,
-    content_type: Option<&str>,
-) -> bool {
+fn should_capture(config: &EventStreamConfig, url: &str, content_type: Option<&str>) -> bool {
     let url_ok = config
         .url_substring_filter
         .as_ref()
@@ -73,11 +61,7 @@ fn should_capture(
     let ct_ok = config
         .content_type_substring_filter
         .as_ref()
-        .map(|filter| {
-            content_type
-                .map(|ct| ct.contains(filter))
-                .unwrap_or(false)
-        })
+        .map(|filter| content_type.map(|ct| ct.contains(filter)).unwrap_or(false))
         .unwrap_or(true);
 
     url_ok && ct_ok
@@ -106,7 +90,10 @@ pub async fn start_event_stream(
     // Spawn task to handle response received events
     let page_response = page.clone();
     tokio::spawn(async move {
-        let mut events = match page_response.event_listener::<EventResponseReceived>().await {
+        let mut events = match page_response
+            .event_listener::<EventResponseReceived>()
+            .await
+        {
             Ok(e) => e,
             Err(_) => return, // page error
         };
@@ -116,7 +103,7 @@ pub async fn start_event_stream(
             let url = event.response.url.clone();
             let status = Some(event.response.status as u16);
             let headers = &event.response.headers;
-            
+
             // Extract content-type from headers
             let headers_value = headers.inner();
             let content_type = headers_value
@@ -124,7 +111,7 @@ pub async fn start_event_stream(
                 .or_else(|| headers_value.get("Content-Type"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            
+
             // Check if we should capture this response
             if should_capture(&config, &url, content_type.as_deref()) {
                 let pending = PendingResponse {
@@ -203,4 +190,24 @@ pub async fn start_event_stream(
     });
 
     Ok(rx)
+}
+
+pub enum EventResult {
+    Timeout,
+    StreamClosed,
+    Ok(Event),
+}
+
+/// Wait for the next event from the receiver with a timeout.
+/// Returns `Ok(Some(event))` if an event is received, `Ok(None)` if the stream is closed,
+/// or `Err(())` if the timeout expires before an event is received.
+pub async fn wait_for_event_with_timeout(
+    rx: &mut mpsc::UnboundedReceiver<Event>,
+    timeout: Duration,
+) -> EventResult {
+    match time::timeout(timeout, rx.next()).await {
+        Ok(Some(event)) => EventResult::Ok(event),
+        Ok(None) => EventResult::StreamClosed,
+        Err(_) => EventResult::Timeout,
+    }
 }
